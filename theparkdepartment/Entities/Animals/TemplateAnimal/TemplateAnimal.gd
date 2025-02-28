@@ -12,6 +12,9 @@ extends CharacterBody3D
 var animal_name: String
 var age: int
 var speed: float
+var default_speed: float
+var max_stamina: int
+var stamina: int
 var speed_modifier = 1
 var gender: String
 var animal_position: Vector2
@@ -30,6 +33,8 @@ var reproduction_cooldown: int
 var reproduction_timer: int
 var desired_position = Vector3()
 var animation_action: String = "idle"
+var default_litter_size: int
+var litter_size: int
 
 var adjusted_eye_sight: float
 var adjusted_eating_distance: float
@@ -48,7 +53,8 @@ func _ready():
 	assert(not species == null)
 	
 	# Fetch settings for this particular animal
-	speed = OhioEcosystemData.animals_species_data[species]["speed"] * speed_modifier
+	default_speed = OhioEcosystemData.animals_species_data[species]["speed"] * speed_modifier
+	max_stamina = OhioEcosystemData.animals_species_data[species]["max_stamina"]
 	max_hunger = OhioEcosystemData.animals_species_data[species]["max_hunger"]
 	reproduction_cooldown = OhioEcosystemData.animals_species_data[species]["reproduction_cooldown"]
 	max_age = OhioEcosystemData.animals_species_data[species]["max_age"]
@@ -59,13 +65,16 @@ func _ready():
 	prey_organisms = OhioEcosystemData.animals_species_data[species]["prey_organisms"]
 	max_social = OhioEcosystemData.animals_species_data[species]["max_social"]
 	social_group_size = OhioEcosystemData.animals_species_data[species]["social_group_size"]
+	default_litter_size = OhioEcosystemData.animals_species_data[species]["litter_size"]
 	
 	# Set initial conditions (slightly random)
-	hunger = get_random_portion(max_hunger, 0.75, 1)
-	reproduction_timer = get_random_portion(reproduction_cooldown, 0.75, 1) 
+	hunger = get_random_portion(max_hunger, 0.5, 1)
+	reproduction_timer = get_random_portion(reproduction_cooldown, 0, 1) 
 	age = get_random_portion(max_age, 0, 0.25)
-	speed = get_random_portion(speed, 0.8, 1.2)
-	social = get_random_portion(max_social, 0.75, 1)
+	speed = get_random_portion(default_speed, 0.8, 1.2)
+	social = get_random_portion(max_social, 0, 1)
+	stamina = get_random_portion(max_stamina, 0, 1)
+	litter_size = get_random_portion(default_litter_size, 0.5, 1.2)
 	
 	# Randomly assign gender
 	gender = "Male" if randi() % 2 == 0 else "Female"
@@ -110,7 +119,7 @@ func _physics_process(delta):
 func update():
 	# Chance to move
 	if randf() < movement_chance:
-		decide_movement()
+		decide_movement_new()
 	
 	# Update needs
 	age += 1
@@ -192,16 +201,151 @@ func reproduce():
 	if OhioEcosystemData.animals_species_data[species]["count"] >= population_limit:
 		return
 	
-	# Create a new instance of the current scene
-	var new_animal = load(self_scene_path).instantiate()
-	new_animal.position = position + Vector3(randf_range(-1, 1), 0, randf_range(-1, 1))
-	new_animal.animal_name = species.to_lower() + "_" + str(OhioEcosystemData.animals_species_data[species]["count"])
-	new_animal.set_random_destination()
+	# Have as many offspring as the litter size
+	for i in range(litter_size):
+		# Create a new instance of the current scene
+		var new_animal = load(self_scene_path).instantiate()
+		new_animal.position = position + Vector3(randf_range(-1, 1), 0, randf_range(-1, 1))
+		new_animal.animal_name = species.to_lower() + "_" + str(OhioEcosystemData.animals_species_data[species]["count"])
+		new_animal.set_random_destination()
+		
+		# Add the new instance to the scene
+		parent.add_child(new_animal)
+
+		# Some of this might be redundant, but there was a bug where the new animal was getting the age of the parent
+		# Setting these to max values so that babies are born with a good chance of survival
+		new_animal.age = 0
+		new_animal.reproduction_timer = get_random_portion(reproduction_cooldown, 0.2, 1)
+		new_animal.hunger = max_hunger
+		new_animal.speed = get_random_portion(default_speed, 0.8, 1.2)
+		new_animal.social = get_random_portion(max_social, 0, 1)
+		new_animal.stamina = get_random_portion(max_stamina, 0, 1)
+		new_animal.litter_size = get_random_portion(default_litter_size, 0.5, 1.2)
+
+		print("New " + species + " has been born: " + animal_name)
+		OhioEcosystemData.animals_species_data[species]["count"] += 1
+
+
+
+func decide_movement_new():
+	# Set a value to help animals decide when to seek food / friends
+	var hunger_threshold = 0.4
+	var social_threshold = 0.3
 	
-	# Add the new instance to the scene
-	parent.add_child(new_animal)
-	print("New " + species + " has been born: " + animal_name)
-	OhioEcosystemData.animals_species_data[species]["count"] += 1
+	# Find current percentage of all needs
+	var is_hungry = (float(hunger) / float(max_hunger)) < hunger_threshold
+	var is_lonely = (float(social) / float(max_social)) < social_threshold
+	
+	var nearby_entities = eye_sight_area.get_overlapping_areas()
+	# Shuffle the entities to avoid bias in decision making
+	nearby_entities.shuffle()
+	
+	# Organize nearby entities into predators, friends, or prey
+	var nearby_prey: Array
+	var nearby_predators: Array
+	var nearby_friends: Array
+	for entity_area3d in nearby_entities:
+		var entity = entity_area3d.get_parent()
+		if entity.species in prey_organisms:
+			nearby_prey.append(entity)
+		elif "prey_organisms" in entity and species in entity.prey_organisms:
+			nearby_predators.append(entity)
+		elif entity.species == species:
+			nearby_friends.append(entity)
+	
+	## PREDATOR AWARENESS
+	# Scan for nearby predators. If any are dangerously close, flee away
+	var threat_direction = Vector3()
+	for predator in nearby_predators:
+		if position.distance_to(predator.position) <= (0.5 * adjusted_eye_sight):
+			# Add the vectors, so that an animal can flee from multiple predators at once
+			threat_direction += (position - predator.position).normalized()
+	# If there are predators nearby, flee in the opposite direction
+	if threat_direction.length() > 0:
+		if stamina > 0:
+			stamina -= 1
+			var flee_direction = threat_direction.normalized()
+			var flee_target_position = position + (flee_direction * adjusted_eye_sight)
+			telepathy_print("Predators nearby, running away!")
+			set_desired_position(clamp_position(flee_target_position))
+			# No other locations should be considered when predators are nearby
+			return
+		else: 
+			# No stamina to flee, so just stay put
+			# This is to avoid the constant chasing of predators, which would be unrealistic
+			# this makes it so one animal eventually gets caught
+			telepathy_print("Predators nearby, but no stamina to flee")
+			set_desired_position(clamp_position(position))
+			stamina = min(stamina + 2, max_stamina)
+			return
+	else:
+		telepathy_print("No predators nearby, regain stamina")
+		stamina = min(stamina + 1, max_stamina)
+	
+	## FOOD SEARCH
+	# If the animal is hungry, look for the nearest prey and target a close one
+	if is_hungry and len(nearby_prey) > 0:
+		# Sort the prey options by distance to help decide
+		nearby_prey.sort_custom(func(a, b):
+			return position.distance_to(a.position) < position.distance_to(b.position)
+		)
+		
+		# Determine which prey to target (should be close, but need not be the closest)
+		var i = get_random_portion(len(nearby_prey), 0, 0.25)
+		telepathy_print("Found prey! " + nearby_prey[i].species)
+		set_desired_position(clamp_position(nearby_prey[i].position))
+		return
+	
+	## SOCIAL INTERACTION
+	# Sort the animals of the same species by distance
+	nearby_friends.sort_custom(func(a, b):
+		return position.distance_to(a.position) < position.distance_to(b.position)
+	)
+	
+	# Check if this animal should move towards a mate
+	if gender == "Male":
+		for friend in nearby_friends:
+			if friend.gender == "Female" and friend.reproduction_timer <= 1:
+				telepathy_print("Moving to a nearby mate")
+				set_desired_position(clamp_position(friend.position))
+				return
+
+	# Check if the size of the social group is too large
+	if len(nearby_friends) >= social_group_size:
+		var leave_group_direction = Vector3()
+		for friend in nearby_friends:
+			if position.distance_to(friend.position) <= social_range:
+				# Add the vectors, so that an animal can flee from multiple predators at once
+				leave_group_direction += (position - friend.position).normalized()
+		# If there are predators nearby, flee in the opposite direction
+		if leave_group_direction.length() > 0:
+			var flee_direction = leave_group_direction.normalized()
+			var flee_target_position = position + (flee_direction * adjusted_eye_sight)
+			telepathy_print("Predators nearby, running away!")
+			set_desired_position(clamp_position(flee_target_position))
+			return
+	elif is_lonely and len(nearby_friends) > 0: # If the animal is lonely, look for the nearest friend and target a close one
+		# Determine which friend to target (should be close, but need not be the closest)
+		var i = get_random_portion(len(nearby_friends), 0, 0.25)
+		telepathy_print("Moving towards some friends!")
+		set_desired_position(clamp_position(nearby_friends[i].position))
+		return
+	
+	## RANDOM BEHAVIOR
+	# At this point, the animal should just do something random.
+	var random_choice = randi_range(1, 5)
+	# Chance to stand still
+	if random_choice == 1:
+		telepathy_print("Nothing to do... Standing still")
+		set_desired_position(clamp_position(position))
+	# Chance to go somewhere random
+	if random_choice == 2:
+		telepathy_print("Nothing to do... Going somewhere random!")
+		set_random_destination()
+	# Chance to continue towards previous destination
+	if random_choice >= 3:
+		telepathy_print("Nothing to do... Moving towards desired position")
+		pass
 
 
 func decide_movement():
@@ -273,7 +417,7 @@ func decide_movement():
 				return
 
 	# If the animal is lonely, look for the nearest friend and target a close one
-	if is_lonely:
+	if is_lonely and len(nearby_friends) > 0:
 		# Determine which friend to target (should be close, but need not be the closest)
 		var i = get_random_portion(len(nearby_friends), 0, 0.25)
 		telepathy_print("Moving towards some friends!")
